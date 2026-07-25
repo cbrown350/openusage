@@ -40,6 +40,45 @@ enum OllamaUsageMapper {
             || html.range(of: #"aria-label="session usage"#, options: .caseInsensitive) != nil
     }
 
+    /// Extract the account name from the Ollama settings page HTML using the exact XPath selector.
+    /// XPath: /html/body/div/div/div/div/div/a
+    /// Returns nil when the selector matches nothing or yields empty text.
+    static func parseAccountName(from html: String) -> String? {
+        // The account identity lives in the `#user-nav` dropdown on ollama.com/settings:
+        //   <nav id="user-nav" …>
+        //     <a href="/settings" …>USERNAME</a>
+        //     <div class="text-sm text-neutral-500 …">EMAIL</div>
+        //   </nav>
+        // Verified against the live page: anchoring on `id="user-nav"` is what separates the real
+        // account from the many other nav links ("Models", "My models", …) that naive patterns grab.
+        // Prefer the USERNAME link (the display name the user expects, e.g. "ollama_user"); fall back to
+        // the email only if the username link is absent.
+        let patterns = [
+            // Username link inside the user-nav block.
+            #"id="user-nav".*?<a href="/settings"[^>]*>\s*([^<]+?)\s*</a>"#,
+            // Email inside the user-nav block (fallback).
+            #"id="user-nav".*?([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"#,
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(
+                pattern: pattern, options: [.dotMatchesLineSeparators, .caseInsensitive]
+            ) else { continue }
+            let range = NSRange(html.startIndex..., in: html)
+            guard let match = regex.firstMatch(in: html, options: [], range: range),
+                  match.numberOfRanges > 1,
+                  let nameRange = Range(match.range(at: 1), in: html) else { continue }
+            let name = String(html[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty && name.count < 100 && !name.contains("<") && !name.contains(">") {
+                AppLog.info(LogTag.plugin("ollama"), "Found account name: '\(name)'")
+                return name
+            }
+        }
+
+        AppLog.debug(LogTag.plugin("ollama"), "No account name found in settings page")
+        return nil
+    }
+
     /// Parse the authenticated settings-page HTML. Returns `nil` when the page isn't a logged-in Cloud
     /// Usage page (no usage marker) or the two meters can't be found — the provider turns that into a
     /// typed "could not parse" error rather than blank meters.

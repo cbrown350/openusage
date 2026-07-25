@@ -2,35 +2,65 @@ import Foundation
 
 @MainActor
 final class OllamaProvider: ProviderRuntime {
-    let provider = Provider(
-        id: "ollama",
-        displayName: "Ollama",
-        icon: .providerMark("ollama"),
-        links: [
-            ProviderLink(label: "Dashboard", url: "https://ollama.com/settings")
-        ]
-    )
+    let provider: Provider
 
     let authStore: OllamaAuthStore
     let usageClient: OllamaUsageClient
     let now: @Sendable () -> Date
+    let accountID: Int?
 
+    /// Callback for reporting discovered account names during refresh.
+    /// Called with (accountID, discoveredName) when a name is extracted from the settings page.
+    var onAccountNameDiscovered: ((Int, String?) -> Void)?
+
+    /// Static factory for creating Provider instances with custom id/displayName.
+    /// Used for multi-account cards.
+    static func makeProvider(id: String = "ollama", displayName: String = "Ollama") -> Provider {
+        Provider(
+            id: id,
+            displayName: displayName,
+            icon: .providerMark("ollama"),
+            links: [
+                ProviderLink(label: "Dashboard", url: "https://ollama.com/settings")
+            ]
+        )
+    }
+
+    /// Default initializer for single-account (backward compatible).
     init(
         authStore: OllamaAuthStore = OllamaAuthStore(),
         usageClient: OllamaUsageClient = OllamaUsageClient(),
         now: @escaping @Sendable () -> Date = Date.init
     ) {
+        self.provider = Self.makeProvider()
         self.authStore = authStore
         self.usageClient = usageClient
         self.now = now
+        self.accountID = nil
+    }
+
+    /// Multi-account initializer.
+    init(
+        provider: Provider,
+        authStore: OllamaAuthStore,
+        usageClient: OllamaUsageClient = OllamaUsageClient(),
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        self.provider = provider
+        self.authStore = authStore
+        self.usageClient = usageClient
+        self.now = now
+        // Use the authStore's account ID, which is set for both the default card and ollama@N cards
+        self.accountID = authStore.accountID
     }
 
     var widgetDescriptors: [WidgetDescriptor] {
-        [
-            .percent(id: "ollama.session", provider: provider, title: "Session",
+        let prefix = provider.id // "ollama" or "ollama@N"
+        return [
+            .percent(id: "\(prefix).session", provider: provider, title: "Session",
                      metricLabel: "Session", isSessionWindow: true)
                 .exportingLimit("session", unit: "percent"),
-            .percent(id: "ollama.weekly", provider: provider, title: "Weekly",
+            .percent(id: "\(prefix).weekly", provider: provider, title: "Weekly",
                      metricLabel: "Weekly")
                 .exportingLimit("weekly", unit: "percent")
         ]
@@ -83,6 +113,19 @@ final class OllamaProvider: ProviderRuntime {
         guard OllamaUsageMapper.looksLikeUsagePage(html) else {
             return ProviderSnapshot.error(provider: provider, error: OllamaUsageError.sessionExpired)
         }
+
+        // Extract and report the discovered account name (if this is a multi-account instance)
+        if let accountID = accountID {
+            AppLog.info(LogTag.plugin("ollama"), "Account \(accountID): attempting to discover account name from HTML")
+            let discoveredName = OllamaUsageMapper.parseAccountName(from: html)
+            if let name = discoveredName {
+                AppLog.info(LogTag.plugin("ollama"), "Account \(accountID): discovered name '\(name)' - will update store")
+            } else {
+                AppLog.warn(LogTag.plugin("ollama"), "Account \(accountID): no account name found in HTML - using default name")
+            }
+            onAccountNameDiscovered?(accountID, discoveredName)
+        }
+
         guard let usage = OllamaUsageMapper.parseSettings(html: html, now: now()) else {
             return ProviderSnapshot.error(provider: provider, error: OllamaUsageError.invalidResponse)
         }

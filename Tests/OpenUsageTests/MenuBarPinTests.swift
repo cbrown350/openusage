@@ -136,6 +136,48 @@ final class MenuBarPinTests: XCTestCase {
 
     // MARK: - Fixtures
 
+    /// The owner decision for Ollama: a GUI-added Ollama account card auto-pins its default metrics to
+    /// the menu bar (so two accounts → two strips), while Claude account cards keep the existing
+    /// never-auto-pin behavior.
+    func testOllamaAccountCardAutoPinsToMenuBarButClaudeDoesNot() {
+        let defaults = makeDefaults("ollama-account-pin")
+        // Launch 1: default family cards only — establishes a saved layout with the family defaults pinned.
+        _ = LayoutStore(registry: makeFamilyRegistry(accountCards: []), defaults: defaults, storageKey: "layout")
+
+        // Launch 2: an Ollama account card and a Claude account card appear.
+        let store = LayoutStore(
+            registry: makeFamilyRegistry(accountCards: ["ollama@1", "claude@ab12cd34"]),
+            defaults: defaults,
+            storageKey: "layout"
+        )
+
+        // The new Ollama card's default metrics claim menu-bar space...
+        XCTAssertTrue(store.pinnedMetricIDs.contains("ollama@1.session"), "Ollama account card should auto-pin")
+        XCTAssertTrue(store.pinnedMetricIDs.contains("ollama@1.weekly"))
+        // ...but the Claude account card never auto-pins (behavior unchanged).
+        XCTAssertFalse(store.pinnedMetricIDs.contains("claude@ab12cd34.session"), "Claude account card must not auto-pin")
+        XCTAssertFalse(store.pinnedMetricIDs.contains("claude@ab12cd34.weekly"))
+        // And the Ollama card actually renders in the strip while the Claude card does not.
+        let stripProviderIDs = store.pinnedGroups.map(\.provider.id)
+        XCTAssertTrue(stripProviderIDs.contains("ollama@1"))
+        XCTAssertFalse(stripProviderIDs.contains("claude@ab12cd34"))
+    }
+
+    /// A registry of the Ollama + Claude families, each with session/weekly metrics matching the real
+    /// `DefaultLayout` ids, plus any extra account cards (`ollama@1`, `claude@ab12cd34`).
+    private func makeFamilyRegistry(accountCards: [String]) -> WidgetRegistry {
+        let allIDs = ["ollama", "claude"] + accountCards
+        let providers = allIDs.map { id in
+            Provider(id: id, displayName: id.uppercased(), icon: .providerMark("ollama"))
+        }
+        let descriptors = providers.flatMap { provider in
+            ["session", "weekly"].map { suffix in
+                metric(provider, id: "\(provider.id).\(suffix)", label: suffix.capitalized)
+            }
+        }
+        return WidgetRegistry(providers: providers, descriptors: descriptors)
+    }
+
     private func makeStore(_ name: String) -> LayoutStore {
         LayoutStore(registry: makeRegistry(), defaults: makeDefaults(name), storageKey: "layout")
     }

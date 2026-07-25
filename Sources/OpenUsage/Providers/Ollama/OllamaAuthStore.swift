@@ -54,14 +54,27 @@ struct OllamaAuthStore: Sendable {
     /// environment so a user who exports `OLLAMA_API_KEY` gets the API path without a config file.
     static let apiKeyEnvironmentName = "OLLAMA_API_KEY"
 
+    /// Per-account config file pattern: `~/.config/openusage/ollama.account.N.json`
+    static func perAccountConfigPath(accountID: Int) -> String {
+        "~/.config/openusage/ollama.account.\(accountID).json"
+    }
+
     private let store: UserAPIKeyStore
     private let environment: EnvironmentReading
+    /// The multi-account record id this store is scoped to, or nil for the legacy single-account store.
+    /// Exposed so the provider can drive account-name discovery even for the default card (whose
+    /// provider id is the bare "ollama" and carries no `@N` suffix to parse).
+    let accountID: Int?
+    private let directSessionCookie: String?
 
+    /// Default initializer for single-account (backward compatible) or env-only usage.
     init(
         files: TextFileAccessing = LocalTextFileAccessor(),
         environment: EnvironmentReading = ProcessEnvironmentReader()
     ) {
         self.environment = environment
+        self.accountID = nil
+        self.directSessionCookie = nil
         store = UserAPIKeyStore(
             configPaths: Self.configPaths,
             environmentNames: Self.environmentNames,
@@ -71,10 +84,39 @@ struct OllamaAuthStore: Sendable {
         )
     }
 
+    /// Per-account initializer: scoped to a specific account ID with an injected session cookie.
+    /// Used by multi-account provider instances.
+    init(
+        accountID: Int,
+        sessionCookie: String,
+        files: TextFileAccessing = LocalTextFileAccessor(),
+        environment: EnvironmentReading = ProcessEnvironmentReader()
+    ) {
+        self.accountID = accountID
+        self.directSessionCookie = sessionCookie
+        self.environment = environment
+
+        // For per-account instances, read from per-account config file as fallback
+        let accountConfigPath = Self.perAccountConfigPath(accountID: accountID)
+        store = UserAPIKeyStore(
+            configPaths: [accountConfigPath],
+            environmentNames: [], // No env vars for per-account instances
+            files: files,
+            environment: environment,
+            makeError: { OllamaAuthError($0) }
+        )
+    }
+
     /// Load the session cookie, extracting the `__Secure-session` value from a full Cookie header
-    /// if needed.
+    /// if needed. For per-account instances with an injected cookie, returns that directly.
     func loadSessionCookie() -> OllamaAuth? {
-        store.loadKey().flatMap { raw in
+        // If this is a per-account instance with a direct cookie, use that
+        if let directCookie = directSessionCookie {
+            return OllamaAuth(sessionCookie: directCookie)
+        }
+
+        // Otherwise, load from config file or environment (single-account mode)
+        return store.loadKey().flatMap { raw in
             Self.extractSessionValue(from: raw).map(OllamaAuth.init(sessionCookie:))
         }
     }

@@ -23,6 +23,7 @@ struct LayoutInitialState {
     let shouldPersistPlaced: Bool
     let shouldPersistExpanded: Bool
     let shouldPersistExpandOnEnable: Bool
+    let shouldPersistPins: Bool
     let seededDefaultsToPersist: Set<String>?
 }
 
@@ -59,7 +60,8 @@ enum LayoutBootstrap {
 
         // An existing value — including an empty array from a user who unpinned everything — wins.
         // Unknown saved ids are retained as invisible tombstones for temporarily absent account cards.
-        let pinnedMetricIDs: Set<String>
+        var pinnedMetricIDs: Set<String>
+        var shouldPersistPins = false
         if let savedPins = persistence.loadPins() {
             pinnedMetricIDs = Set(savedPins)
         } else {
@@ -89,6 +91,22 @@ enum LayoutBootstrap {
         if !newlyExpanded.isSubset(of: expandedMetricIDs) {
             expandedMetricIDs.formUnion(newlyExpanded)
             shouldPersistExpanded = true
+        }
+
+        // A newly-appearing account card's default-pinned metrics claim menu-bar space the first time
+        // the card is placed, so a GUI-added account shows in the menu bar without a manual pin. Only
+        // account-card metrics qualify, and only families whose translated defaults carry the card's
+        // pins (Ollama) intersect — Claude/Codex account cards never auto-pin. Metrics the user already
+        // had are never disturbed.
+        let newlyPinned = Set(seededResult.newlyPlaced)
+            .intersection(defaults.pinnedMetricIDs)
+            .filter { id in
+                guard let descriptor = registry.descriptor(id: id) else { return false }
+                return ProviderAccountID.isAccountCard(descriptor.providerID)
+            }
+        if !newlyPinned.isSubset(of: pinnedMetricIDs) {
+            pinnedMetricIDs.formUnion(newlyPinned)
+            shouldPersistPins = true
         }
 
         // Optional default-expanded metrics enter below the caret the first time they are enabled. The
@@ -122,6 +140,7 @@ enum LayoutBootstrap {
             shouldPersistPlaced: seededResult.shouldPersistPlaced,
             shouldPersistExpanded: shouldPersistExpanded,
             shouldPersistExpandOnEnable: savedOnEnable == nil,
+            shouldPersistPins: shouldPersistPins,
             seededDefaultsToPersist: seededResult.shouldPersistSeededDefaults
                 ? seededResult.seededDefaults
                 : nil

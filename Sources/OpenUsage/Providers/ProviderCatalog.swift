@@ -9,10 +9,14 @@ enum ProviderCatalog {
     /// Claude card, with credentials and usage logs pinned to exactly its own config dir. The empty
     /// default keeps the historical single-card set for focused tests and callers that intentionally
     /// skip the account pass.
+    ///
+    /// `ollamaCards` carries the GUI-managed Ollama account cards from `OllamaAccountAssembly`.
+    /// Each becomes an independent runtime with its own session cookie and account name discovery.
     static func make(
         defaults: UserDefaults = .standard,
         claudeCards: [ClaudeAccountCard] = [],
-        defaultClaudeExtraLogRoots: [URL] = []
+        defaultClaudeExtraLogRoots: [URL] = [],
+        ollamaCards: [OllamaAccountAssembly.OllamaAccountCard] = []
     ) -> [ProviderRuntime] {
         // Default provider order (see AGENTS.md "## Providers"): the three established providers first,
         // then every other provider alphabetically by display name. Account cards slot in right after
@@ -39,12 +43,44 @@ enum ProviderCatalog {
             CopilotProvider(defaults: defaults),
             DevinProvider(),
             GrokProvider(),
-            OllamaProvider(),
+        ]
+
+        // Ollama multi-account setup
+        AppLog.info(.config, "ProviderCatalog: building Ollama providers (\(ollamaCards.count) cards)")
+        if ollamaCards.isEmpty {
+            // No active account cards: use the default single-account provider, which reads the
+            // baseline credential (ollama.json / env vars). Ollama always stays present as a provider
+            // — deleting every multi-account card removes those cards but never the provider itself;
+            // the deleted cards stay gone because migration never re-adds a tombstoned cookie.
+            AppLog.info(.config, "ProviderCatalog: no active Ollama accounts, using default provider")
+            runtimes.append(OllamaProvider())
+        } else {
+            // Has accounts: use the first account as the default, then add the rest
+            AppLog.info(.config, "ProviderCatalog: creating \(ollamaCards.count) Ollama provider(s)")
+            for (index, card) in ollamaCards.enumerated() {
+                if index == 0 {
+                    // First account becomes the default "ollama" card
+                    AppLog.info(.config, "ProviderCatalog: creating 'ollama' (default) from account \(card.accountID): '\(card.displayName)'")
+                    runtimes.append(OllamaProvider(
+                        provider: OllamaProvider.makeProvider(id: "ollama", displayName: card.displayName),
+                        authStore: OllamaAuthStore(accountID: card.accountID, sessionCookie: card.sessionCookie)
+                    ))
+                } else {
+                    // Additional accounts become "ollama@N" cards
+                    AppLog.info(.config, "ProviderCatalog: creating '\(card.id)' from account \(card.accountID): '\(card.displayName)'")
+                    runtimes.append(ollamaAccountRuntime(card: card))
+                }
+            }
+        }
+
+        runtimes += [
             OpenCodeProvider(),
             OpenRouterProvider(),
             QwenProvider(),
             ZAIProvider()
         ]
+
+        AppLog.info(.config, "ProviderCatalog: total providers created: \(runtimes.count)")
         return runtimes
     }
 
@@ -62,5 +98,15 @@ enum ProviderCatalog {
                 rootsOverride: [URL(fileURLWithPath: card.configDirPath)] + card.extraLogRoots
             )
         )
+    }
+
+    /// An extra Ollama account card: same provider machinery with its own session cookie and
+    /// account name discovery callback.
+    private static func ollamaAccountRuntime(card: OllamaAccountAssembly.OllamaAccountCard) -> OllamaProvider {
+        let provider = OllamaProvider(
+            provider: OllamaProvider.makeProvider(id: card.id, displayName: card.displayName),
+            authStore: OllamaAuthStore(accountID: card.accountID, sessionCookie: card.sessionCookie)
+        )
+        return provider
     }
 }

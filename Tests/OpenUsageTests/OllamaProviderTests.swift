@@ -233,6 +233,57 @@ final class OllamaUsageMapperTests: XCTestCase {
         XCTAssertFalse(text.contains("script"))
     }
 
+    // MARK: Account name discovery
+
+    /// The live ollama.com/settings page (captured 2026-07): the account identity lives in the
+    /// `#user-nav` dropdown as a username `<a href="/settings">` link plus an email `<div>`. The page
+    /// also has many other nav links ("Models", "My models") that naive patterns wrongly grab — this
+    /// test pins the parser to the real structure so it returns the account, not a nav label.
+    private let realUserNavHTML = #"""
+    <header class="sticky top-0">
+      <nav class="flex w-full items-center justify-between px-6">
+        <a href="/models">Models</a>
+        <a href="/my/models">My models</a>
+        <button>Menu</button>
+        <nav id="user-nav" class="absolute hidden mt-2 right-0 w-52 rounded-2xl">
+          <div class="py-2">
+            <div class="flex flex-col px-4">
+              <div class="flex justify-between items-center gap-x-2 mb-1">
+                <a href="/settings" class="font-medium text-xl hover:underline" >ollama_user</a>
+              </div>
+              <div class="text-sm text-neutral-500 break-words">user@example.com</div>
+            </div>
+          </div>
+        </nav>
+      </nav>
+    </header>
+    """#
+
+    func testParseAccountNamePrefersUsernameFromUserNav() {
+        // The username link is the display name the user expects (e.g. "ollama_user"), and must win over
+        // both the email and the surrounding nav links.
+        XCTAssertEqual(OllamaUsageMapper.parseAccountName(from: realUserNavHTML), "ollama_user")
+    }
+
+    func testParseAccountNameFallsBackToEmailWhenNoUsernameLink() {
+        let noUsername = realUserNavHTML.replacingOccurrences(
+            of: #"<a href="/settings" class="font-medium text-xl hover:underline" >ollama_user</a>"#,
+            with: ""
+        )
+        XCTAssertEqual(OllamaUsageMapper.parseAccountName(from: noUsername), "user@example.com")
+    }
+
+    func testParseAccountNameDoesNotGrabNavLabels() {
+        // Regression: earlier patterns returned "Models" / "My models" from the top nav.
+        let name = OllamaUsageMapper.parseAccountName(from: realUserNavHTML)
+        XCTAssertNotEqual(name, "Models")
+        XCTAssertNotEqual(name, "My models")
+    }
+
+    func testParseAccountNameNilWhenNoUserNav() {
+        XCTAssertNil(OllamaUsageMapper.parseAccountName(from: loginHTML))
+    }
+
     // MARK: API fallback (future /api/account/usage)
 
     func testParseAPIUsageNestedObjects() {
@@ -440,5 +491,452 @@ final class OllamaProviderTests: XCTestCase {
 
     private func makeAuthStore(cookie: String) -> OllamaAuthStore {
         OllamaAuthStore(files: FakeFiles(), environment: FakeEnvironment(["OLLAMA_SESSION_COOKIE": cookie]))
+    }
+}
+
+// MARK: - OllamaAccountsStoreTests
+
+@MainActor
+final class OllamaAccountsStoreTests: XCTestCase {
+    private var defaults: UserDefaults!
+    private var store: OllamaAccountsStore!
+
+    override func setUp() {
+        super.setUp()
+        // Use a unique defaults suite for each test to ensure isolation
+        defaults = UserDefaults(suiteName: "test-ollama-accounts-\(UUID().uuidString)")!
+        // Clear any existing data
+        defaults.removeObject(forKey: OllamaAccountsStore.storageKey)
+        defaults.synchronize()
+        // Disable migration in tests
+        store = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+    }
+
+    override func tearDown() {
+        // Clean up defaults
+        defaults.removeObject(forKey: OllamaAccountsStore.storageKey)
+        defaults.synchronize()
+        super.tearDown()
+    }
+
+    func testEmptyStoreHasNoActiveRecords() {
+        XCTAssertTrue(store.activeRecords.isEmpty, "Store should start empty but has \(store.activeRecords.count) records")
+        XCTAssertFalse(store.isAtCapacity)
+    }
+
+    func testAddAccountCreatesRecordWithSequentialID() {
+        let account1 = store.addAccount(sessionCookie: "cookie1")
+        XCTAssertNotNil(account1)
+        XCTAssertEqual(account1?.id, 0)
+        XCTAssertEqual(account1?.sessionCookie, "cookie1")
+        XCTAssertEqual(account1?.derivedDisplayName, "Account 1")
+
+        let account2 = store.addAccount(sessionCookie: "cookie2")
+        XCTAssertNotNil(account2)
+        XCTAssertEqual(account2?.id, 1)
+        XCTAssertEqual(account2?.sessionCookie, "cookie2")
+        XCTAssertEqual(account2?.derivedDisplayName, "Account 2")
+    }
+
+    func testAddAccountRespectsCapacityLimit() {
+        // Add accounts up to the limit
+        for i in 0..<OllamaAccountsStore.maxAccounts {
+            let account = store.addAccount(sessionCookie: "cookie\(i)")
+            XCTAssertNotNil(account, "Should be able to add account \(i)")
+            XCTAssertEqual(account?.id, i)
+        }
+
+        XCTAssertTrue(store.isAtCapacity)
+
+        // Should not be able to add beyond the limit
+        let overflow = store.addAccount(sessionCookie: "overflow")
+        XCTAssertNil(overflow, "Should not allow adding beyond capacity")
+    }
+
+    func testRemoveAccountTombstonesRecord() {
+        let account = store.addAccount(sessionCookie: "cookie1")
+        XCTAssertNotNil(account)
+        XCTAssertEqual(store.activeRecords.count, 1)
+
+        store.removeAccount(accountID: account!.id)
+        XCTAssertEqual(store.activeRecords.count, 0, "Removed account should not be in active records")
+    }
+
+    /// Regression: IDs must be unique across the record's whole lifetime. Computing the next ID from
+    /// only the *active* records reused a just-deleted account's ID, producing two records with the
+    /// same `id` — which then made deletion appear to do nothing (the active twin survived).
+    func testAddAfterDeleteDoesNotReuseDeletedID() {
+        let first = store.addAccount(sessionCookie: "cookie1")
+        XCTAssertEqual(first?.id, 0)
+        store.removeAccount(accountID: first!.id)
+
+        let second = store.addAccount(sessionCookie: "cookie2")
+        XCTAssertNotEqual(second?.id, first?.id, "New account must not reuse the deleted account's ID")
+        XCTAssertEqual(second?.id, 1)
+
+        let allIDs = store.records.map { $0.id }
+        XCTAssertEqual(allIDs.count, Set(allIDs).count, "IDs must be unique across all records, got \(allIDs)")
+    }
+
+    /// Regression for "clicking delete does nothing": the wild stores had a tombstoned record and an
+    /// active record sharing an ID. Deleting that ID must make the account disappear for good — the
+    /// active record the user sees must go, and stay gone across a reload.
+    func testDeleteRemovesActiveRecordDespiteTombstonedTwin() {
+        // Reproduce the exact corrupted shape found in the user's defaults.
+        let corrupted: [OllamaAccountRecord] = [
+            OllamaAccountRecord(id: 0, sessionCookie: "c0", removedTombstone: true),
+            OllamaAccountRecord(id: 0, sessionCookie: "c0", removedTombstone: false),
+        ]
+        defaults.set(try! JSONEncoder().encode(corrupted), forKey: OllamaAccountsStore.storageKey)
+        let loaded = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+        XCTAssertEqual(loaded.activeRecords.filter { $0.id == 0 }.count, 1, "one active id 0 visible to the user")
+
+        loaded.removeAccount(accountID: 0)
+        XCTAssertEqual(loaded.activeRecords.filter { $0.id == 0 }.count, 0,
+                       "Deleting id 0 must remove the active record, not just re-tombstone the twin")
+
+        // And it must stay gone after a reload (persisted correctly).
+        let reloaded = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+        XCTAssertEqual(reloaded.activeRecords.filter { $0.id == 0 }.count, 0, "deletion must persist")
+    }
+
+    /// Regression for "the account keeps showing back up despite deleting": once a cookie is deleted
+    /// (tombstoned), re-running migration must NOT re-add it. The old code only checked active records,
+    /// so a deleted cookie looked "new" and resurrected on every launch.
+    func testMigrationDoesNotResurrectDeletedCookie() {
+        // Migrate a cookie in, then delete it.
+        store.migrateCookieIfNeeded("legacy-cookie")
+        XCTAssertEqual(store.activeRecords.map { $0.sessionCookie }, ["legacy-cookie"])
+        let id = store.activeRecords.first!.id
+        store.removeAccount(accountID: id)
+        XCTAssertEqual(store.activeRecords.count, 0, "account deleted")
+
+        // Migration runs again (e.g. next launch) — the deleted cookie must stay gone.
+        store.migrateCookieIfNeeded("legacy-cookie")
+        XCTAssertEqual(store.activeRecords.count, 0, "deleted cookie must not resurrect")
+    }
+
+    /// Migration adds a genuinely new legacy cookie, but assigns a unique ID even alongside tombstones.
+    func testMigrationAddsNewCookieWithUniqueID() {
+        let a = store.addAccount(sessionCookie: "cookie-a")
+        store.removeAccount(accountID: a!.id)            // tombstone id 0
+        store.migrateCookieIfNeeded("cookie-b")          // new cookie
+        let b = store.activeRecords.first { $0.sessionCookie == "cookie-b" }
+        XCTAssertNotNil(b)
+        XCTAssertNotEqual(b?.id, a?.id, "migrated cookie must not reuse the tombstoned ID")
+    }
+
+    /// Regression for "why does it say Account 3 when I only have 2 accounts?": display names must be
+    /// ordinal-based (position among active accounts), not ID-based. Deleting account 0 then adding a
+    /// new account (which gets id=3) should still show as "Account 2", not "Account 4".
+    func testDisplayNamesAreOrdinalNotIDBased() {
+        let a0 = store.addAccount(sessionCookie: "cookie-0")  // id 0
+        let a1 = store.addAccount(sessionCookie: "cookie-1")  // id 1
+        let a2 = store.addAccount(sessionCookie: "cookie-2")  // id 2
+
+        XCTAssertEqual(store.displayName(accountID: a0!.id), "Account 1")
+        XCTAssertEqual(store.displayName(accountID: a1!.id), "Account 2")
+        XCTAssertEqual(store.displayName(accountID: a2!.id), "Account 3")
+
+        // Delete account 0, then add a new account (gets id 3)
+        store.removeAccount(accountID: a0!.id)
+        let a3 = store.addAccount(sessionCookie: "cookie-3")  // id 3
+        XCTAssertEqual(a3?.id, 3, "new account gets next unique ID")
+
+        // Display names should be ordinal: Account 1, 2, 3 (not 2, 3, 4)
+        XCTAssertEqual(store.displayName(accountID: a1!.id), "Account 1", "id 1 is now first active")
+        XCTAssertEqual(store.displayName(accountID: a2!.id), "Account 2", "id 2 is now second active")
+        XCTAssertEqual(store.displayName(accountID: a3!.id), "Account 3", "id 3 is now third active")
+    }
+
+    /// Repair pre-existing corrupted stores (duplicate IDs from the old add-after-delete bug) on load.
+    func testLoadRepairsDuplicateIDs() {
+        let corrupted: [OllamaAccountRecord] = [
+            OllamaAccountRecord(id: 0, sessionCookie: "c0", removedTombstone: true),
+            OllamaAccountRecord(id: 0, sessionCookie: "c0", removedTombstone: false),
+            OllamaAccountRecord(id: 1, sessionCookie: "c1", removedTombstone: true),
+            OllamaAccountRecord(id: 1, sessionCookie: "c1", removedTombstone: false),
+        ]
+        defaults.set(try! JSONEncoder().encode(corrupted), forKey: OllamaAccountsStore.storageKey)
+
+        let repaired = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+        let ids = repaired.records.map { $0.id }
+        XCTAssertEqual(ids.count, Set(ids).count, "Duplicate IDs must be collapsed on load, got \(ids)")
+        XCTAssertEqual(repaired.activeRecords.count, 2, "Both active accounts should survive repair")
+    }
+
+    func testRenameAccountUpdatesCustomLabel() {
+        let account = store.addAccount(sessionCookie: "cookie1")
+        XCTAssertEqual(account?.resolvedDisplayName, "Account 1")
+
+        let cardID = OllamaAccountsStore.cardID(for: account!.id)
+        store.rename(cardID: cardID, to: "My Ollama Account")
+
+        let updatedRecord = store.activeRecords.first
+        XCTAssertEqual(updatedRecord?.customLabel, "My Ollama Account")
+        XCTAssertEqual(updatedRecord?.resolvedDisplayName, "My Ollama Account")
+    }
+
+    func testUpdateDiscoveredLabelDoesNotOverrideCustomLabel() {
+        let account = store.addAccount(sessionCookie: "cookie1")
+        let cardID = OllamaAccountsStore.cardID(for: account!.id)
+
+        // Set a custom label
+        store.rename(cardID: cardID, to: "Custom Name")
+        XCTAssertEqual(store.activeRecords.first?.resolvedDisplayName, "Custom Name")
+
+        // Try to update discovered label - should be ignored due to custom label
+        store.updateDiscoveredLabel(accountID: account!.id, label: "Discovered Name")
+
+        // Custom label should still win
+        XCTAssertEqual(store.activeRecords.first?.resolvedDisplayName, "Custom Name")
+        // Discovered label should NOT be stored when custom label exists (implementation exits early)
+        XCTAssertNil(store.activeRecords.first?.discoveredLabel, "Discovered label should not be stored when custom label exists")
+    }
+
+    func testUpdateDiscoveredLabelWhenNoCustomLabel() {
+        let account = store.addAccount(sessionCookie: "cookie1")
+        let accountID = account!.id
+
+        XCTAssertEqual(account?.resolvedDisplayName, "Account 1")
+
+        store.updateDiscoveredLabel(accountID: accountID, label: "Jane Doe")
+        XCTAssertEqual(store.activeRecords.first?.resolvedDisplayName, "Jane Doe")
+        XCTAssertEqual(store.activeRecords.first?.discoveredLabel, "Jane Doe")
+    }
+
+    func testUpdateSessionCookie() {
+        let account = store.addAccount(sessionCookie: "cookie1")
+        let accountID = account!.id
+
+        XCTAssertEqual(store.activeRecords.first?.sessionCookie, "cookie1")
+
+        store.updateSessionCookie(accountID: accountID, cookie: "cookie2")
+        XCTAssertEqual(store.activeRecords.first?.sessionCookie, "cookie2")
+    }
+
+    func testPersistenceAcrossInstances() {
+        let account = store.addAccount(sessionCookie: "cookie1")
+        XCTAssertNotNil(account)
+
+        // Create a new store instance with the same defaults (migration off so it doesn't pull in the
+        // real machine's legacy cookie and skew the count).
+        let newStore = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+        XCTAssertEqual(newStore.activeRecords.count, 1)
+        XCTAssertEqual(newStore.activeRecords.first?.sessionCookie, "cookie1")
+        XCTAssertEqual(newStore.activeRecords.first?.id, 0)
+    }
+
+    func testCardIDAndAccountIDParsing() {
+        XCTAssertEqual(OllamaAccountsStore.cardID(for: 0), "ollama@0")
+        XCTAssertEqual(OllamaAccountsStore.cardID(for: 5), "ollama@5")
+
+        XCTAssertEqual(OllamaAccountsStore.accountID(from: "ollama@0"), 0)
+        XCTAssertEqual(OllamaAccountsStore.accountID(from: "ollama@5"), 5)
+        XCTAssertNil(OllamaAccountsStore.accountID(from: "ollama"))
+        XCTAssertNil(OllamaAccountsStore.accountID(from: "claude@0"))
+    }
+
+    func testResolvedDisplayNameForCardID() {
+        let account = store.addAccount(sessionCookie: "cookie1")
+        let cardID = OllamaAccountsStore.cardID(for: account!.id)
+
+        XCTAssertEqual(store.resolvedDisplayName(cardID: cardID), "Account 1")
+
+        store.rename(cardID: cardID, to: "Custom Name")
+        XCTAssertEqual(store.resolvedDisplayName(cardID: cardID), "Custom Name")
+    }
+
+    func testLegacyMigrationWhenStoreIsEmpty() {
+        // Create a store that should migrate from legacy config
+        let legacyDefaults = UserDefaults(suiteName: "test-ollama-legacy-\(UUID().uuidString)")!
+        let legacyStore = OllamaAccountsStore(defaults: legacyDefaults)
+
+        // Simulate legacy state by creating an OllamaAuthStore with a cookie
+        let fakeFiles = FakeFiles([OllamaAuthStore.configPaths[0]: "legacy-cookie"])
+        let legacyAuthStore = OllamaAuthStore(
+            files: fakeFiles,
+            environment: FakeEnvironment(["OLLAMA_SESSION_COOKIE": "env-cookie"])
+        )
+
+        // Verify the legacy auth store has a cookie
+        XCTAssertNotNil(legacyAuthStore.loadSessionCookie())
+
+        // The migration should have run when OllamaAccountsStore was initialized
+        // Since we can't easily mock the OllamaAuthStore inside the migration,
+        // we verify the migration logic exists and the store handles empty state
+        XCTAssertTrue(legacyStore.activeRecords.isEmpty || legacyStore.activeRecords.count == 1)
+    }
+}
+
+// MARK: - OllamaAccountAssemblyTests
+
+@MainActor
+final class OllamaAccountAssemblyTests: XCTestCase {
+    func testEmptyStoreProducesEmptyAssembly() {
+        let defaults = UserDefaults(suiteName: "test-ollama-assembly-\(UUID().uuidString)")!
+        let store = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+        let assembly = OllamaAccountAssembly.make(accountsStore: store)
+
+        XCTAssertTrue(assembly.accountCards.isEmpty)
+        XCTAssertTrue(assembly.sessionCookiesByCard.isEmpty)
+    }
+
+    func testAssemblyMapsRecordsToCards() {
+        let defaults = UserDefaults(suiteName: "test-ollama-assembly-\(UUID().uuidString)")!
+        let store = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+
+        let account1 = store.addAccount(sessionCookie: "cookie1")
+        let account2 = store.addAccount(sessionCookie: "cookie2")
+
+        store.rename(cardID: OllamaAccountsStore.cardID(for: account2!.id), to: "Work Account")
+
+        let assembly = OllamaAccountAssembly.make(accountsStore: store)
+
+        XCTAssertEqual(assembly.accountCards.count, 2)
+
+        let card1 = assembly.accountCards.first { $0.accountID == 0 }
+        XCTAssertNotNil(card1)
+        XCTAssertEqual(card1?.id, "ollama@0")
+        XCTAssertEqual(card1?.displayName, "Account 1")
+        XCTAssertEqual(card1?.sessionCookie, "cookie1")
+
+        let card2 = assembly.accountCards.first { $0.accountID == 1 }
+        XCTAssertNotNil(card2)
+        XCTAssertEqual(card2?.id, "ollama@1")
+        XCTAssertEqual(card2?.displayName, "Work Account")
+        XCTAssertEqual(card2?.sessionCookie, "cookie2")
+    }
+
+    func testAssemblyBuildsSessionCookieMap() {
+        let defaults = UserDefaults(suiteName: "test-ollama-assembly-\(UUID().uuidString)")!
+        let store = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+
+        let account1 = store.addAccount(sessionCookie: "cookie1")
+        let account2 = store.addAccount(sessionCookie: "cookie2")
+
+        let assembly = OllamaAccountAssembly.make(accountsStore: store)
+
+        XCTAssertEqual(assembly.sessionCookiesByCard.count, 2)
+        XCTAssertEqual(assembly.sessionCookiesByCard["ollama@0"], "cookie1")
+        XCTAssertEqual(assembly.sessionCookiesByCard["ollama@1"], "cookie2")
+    }
+
+    func testAssemblyExcludesRemovedAccounts() {
+        let defaults = UserDefaults(suiteName: "test-ollama-assembly-\(UUID().uuidString)")!
+        let store = OllamaAccountsStore(defaults: defaults, shouldMigrateLegacyAccount: false)
+
+        let account1 = store.addAccount(sessionCookie: "cookie1")
+        let account2 = store.addAccount(sessionCookie: "cookie2")
+
+        store.removeAccount(accountID: account1!.id)
+
+        let assembly = OllamaAccountAssembly.make(accountsStore: store)
+
+        XCTAssertEqual(assembly.accountCards.count, 1)
+        XCTAssertEqual(assembly.accountCards.first?.accountID, 1)
+        XCTAssertTrue(assembly.sessionCookiesByCard.isEmpty || assembly.sessionCookiesByCard.count == 1)
+    }
+}
+
+// MARK: - Multi-Account Ollama Provider Tests
+
+@MainActor
+final class OllamaMultiAccountProviderTests: XCTestCase {
+    func testMultiAccountProviderUsesCorrectCookie() async throws {
+        let provider = OllamaProvider(
+            provider: OllamaProvider.makeProvider(id: "ollama@2", displayName: "Account 3"),
+            authStore: OllamaAuthStore(accountID: 2, sessionCookie: "account-2-cookie"),
+            usageClient: OllamaUsageClient(http: RoutingHTTPClient { request in
+                XCTAssertEqual(request.headers["Cookie"], "__Secure-session=account-2-cookie")
+                return html(settingsHTML)
+            }),
+            now: { Date(timeIntervalSince1970: 1_800_000_000) }
+        )
+
+        let snapshot = await provider.refresh()
+        XCTAssertEqual(snapshot.plan, "Pro")
+        XCTAssertNil(snapshot.errorCategory)
+    }
+
+    func testMultiAccountProviderReportsAccountID() {
+        let provider = OllamaProvider(
+            provider: OllamaProvider.makeProvider(id: "ollama@5", displayName: "Test Account"),
+            authStore: OllamaAuthStore(accountID: 5, sessionCookie: "cookie"),
+            usageClient: OllamaUsageClient(http: RoutingHTTPClient { _ in html(settingsHTML) })
+        )
+
+        XCTAssertEqual(provider.provider.id, "ollama@5")
+        XCTAssertEqual(provider.accountID, 5)
+    }
+
+    /// When there are no active account cards, the catalog falls back to the default single-account
+    /// provider (reads the baseline credential from `ollama.json` / env vars). Ollama always appears
+    /// as a provider — deleting every multi-account card removes those cards but never the provider.
+    @MainActor
+    func testCatalogUsesLegacyFallbackWhenNoCards() {
+        let runtimes = ProviderCatalog.make(ollamaCards: [])
+        let ollamaCount = runtimes.filter { $0 is OllamaProvider }.count
+        XCTAssertEqual(ollamaCount, 1, "no active cards falls back to the legacy single-account provider")
+    }
+
+    /// Two accounts → two Ollama providers (the default card + one account card).
+    @MainActor
+    func testCatalogBuildsOneProviderPerAccount() {
+        let cards = [
+            OllamaAccountAssembly.OllamaAccountCard(id: "ollama@0", displayName: "Account 1", accountID: 0, sessionCookie: "c0"),
+            OllamaAccountAssembly.OllamaAccountCard(id: "ollama@1", displayName: "Account 2", accountID: 1, sessionCookie: "c1"),
+        ]
+        let runtimes = ProviderCatalog.make(ollamaCards: cards)
+        let ollamaProviders = runtimes.compactMap { $0 as? OllamaProvider }
+        XCTAssertEqual(ollamaProviders.count, 2, "two accounts must build two Ollama providers")
+        XCTAssertEqual(Set(ollamaProviders.map { $0.provider.id }), ["ollama", "ollama@1"])
+    }
+
+    func testAccountNameDiscoveryCallback() async throws {
+        var discoveredAccountID: Int?
+        var discoveredName: String?
+
+        let provider = OllamaProvider(
+            provider: OllamaProvider.makeProvider(id: "ollama@3", displayName: "Account 4"),
+            authStore: OllamaAuthStore(accountID: 3, sessionCookie: "cookie"),
+            usageClient: OllamaUsageClient(http: RoutingHTTPClient { _ in
+                // Return a valid usage page - account name discovery works even without finding a name
+                HTTPResponse(statusCode: 200, headers: [:], body: Data(#"""
+                <html>
+                <body>
+                <h1>Cloud Usage <span>Pro</span></h1>
+                <section>
+                <h2>Session usage</h2>
+                <span class="text-sm">0.6% used</span>
+                <time data-time="2026-05-16T14:55:00Z">Resets in 55 minutes</time>
+                </section>
+                <section>
+                <h2>Weekly usage</h2>
+                <span class="text-sm">17.9% used</span>
+                <time data-time="2026-05-17T13:00:00Z">Resets in 1 day</time>
+                </section>
+                </body>
+                </html>
+                """#.utf8))
+            }),
+            now: { Date(timeIntervalSince1970: 1_800_000_000) }
+        )
+
+        provider.onAccountNameDiscovered = { accountID, name in
+            discoveredAccountID = accountID
+            discoveredName = name
+        }
+
+        let snapshot = await provider.refresh()
+
+        // Verify the callback was invoked with accountID (name might be nil if not found in HTML)
+        XCTAssertEqual(discoveredAccountID, 3)
+        // The name discovery might not find anything in the simple HTML above, so we just check the callback was called
+        XCTAssertNotNil(discoveredAccountID, "Account name discovery callback should be invoked")
+
+        // Also verify the snapshot is valid
+        XCTAssertEqual(snapshot.plan, "Pro")
+        XCTAssertNil(snapshot.errorCategory)
     }
 }

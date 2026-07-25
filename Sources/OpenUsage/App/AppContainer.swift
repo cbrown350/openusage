@@ -43,6 +43,8 @@ final class AppContainer {
     /// The account registry the launch pass reconciled. The UI observes it live: a rename
     /// (`customLabel`) re-titles the card everywhere without a relaunch.
     let accounts: ProviderAccountsStore
+    /// The Ollama account registry for GUI-managed multi-account support.
+    let ollamaAccounts: OllamaAccountsStore
     /// The provider runtimes, kept so on-demand credential detection (the Customize "Reset All" reseed)
     /// can re-probe `hasLocalCredentials()` the same way first-run seeding does.
     private let providers: [ProviderRuntime]
@@ -76,10 +78,25 @@ final class AppContainer {
         let accountAssembly = ProviderAccountAssembly.make(accountsStore: accounts, waitsForLoginShell: true)
         self.accounts = accounts
 
+        // The Ollama multi-account pass: reads GUI-managed accounts and builds the card plan.
+        let ollamaAccounts = OllamaAccountsStore()
+        self.ollamaAccounts = ollamaAccounts
+        let ollamaAssembly = OllamaAccountAssembly.make(accountsStore: ollamaAccounts)
+
         let providers = ProviderCatalog.make(
             claudeCards: accountAssembly.claudeCards,
-            defaultClaudeExtraLogRoots: accountAssembly.defaultClaudeExtraLogRoots
+            defaultClaudeExtraLogRoots: accountAssembly.defaultClaudeExtraLogRoots,
+            ollamaCards: ollamaAssembly.accountCards
         )
+
+        // Wire up Ollama account name discovery callbacks
+        for provider in providers {
+            if let ollamaProvider = provider as? OllamaProvider {
+                ollamaProvider.onAccountNameDiscovered = { [ollamaAccounts] accountID, discoveredName in
+                    ollamaAccounts.updateDiscoveredLabel(accountID: accountID, label: discoveredName)
+                }
+            }
+        }
         let registry = WidgetRegistry.from(providers)
         let apiKeyProviders = providers.compactMap { $0 as? any APIKeyManaging }
         let enablement = ProviderEnablementStore()
@@ -94,8 +111,18 @@ final class AppContainer {
             isProviderEnabled: { [enablement] in enablement.isEnabled($0) },
             orderedDescriptors: { [layout] in layout.visiblePlaced.compactMap { layout.descriptor(for: $0) } },
             notificationSettings: { notificationSettings },
-            providerIdentityKeys: accountAssembly.identityKeysByCard,
-            resolveDisplayName: { [accounts] in accounts.resolvedDisplayName(cardID: $0) }
+            providerIdentityKeys: Self.identityKeysMerging(
+                claude: accountAssembly.identityKeysByCard,
+                ollama: Self.buildOllamaSessionCookies(ollamaAccounts)
+            ),
+            resolveDisplayName: { [accounts, ollamaAccounts] cardID in
+                // Ollama accounts
+                if let name = ollamaAccounts.resolvedDisplayName(cardID: cardID) {
+                    return name
+                }
+                // Claude accounts (existing)
+                return accounts.resolvedDisplayName(cardID: cardID)
+            }
         )
         let iCloudSync = ICloudUsageSyncStore(dataStore: dataStore)
         // Re-enabling a provider should fetch it promptly, so clear any leftover failure backoff before
@@ -237,13 +264,47 @@ final class AppContainer {
     /// their static display name; `Provider.displayName` itself only ever carries the derived
     /// default, so the fallback can never be a stale rename.
     func displayName(for provider: Provider) -> String {
-        accounts.resolvedDisplayName(cardID: provider.id) ?? provider.displayName
+        // Ollama accounts
+        if let name = ollamaAccounts.resolvedDisplayName(cardID: provider.id) {
+            return name
+        }
+        // Claude accounts (existing)
+        return accounts.resolvedDisplayName(cardID: provider.id) ?? provider.displayName
     }
 
     /// Whether the card has an account record a rename can attach to (accounts-model families only,
     /// and only once the account's identity has been observed at least once).
     func canRename(_ providerID: String) -> Bool {
-        accounts.records.contains { $0.id == providerID }
+        // Claude accounts
+        if accounts.records.contains(where: { $0.id == providerID }) { return true }
+        // Ollama accounts
+        if OllamaAccountsStore.accountID(from: providerID) != nil { return true }
+        return false
+    }
+
+    /// Merge identity key maps from multiple assemblies into one combined map.
+    /// Ollama uses session cookies as identity keys for staleness detection.
+    private static func identityKeysMerging(
+        claude: [String: String],
+        ollama: [String: String]
+    ) -> [String: String] {
+        var merged = claude
+        for (cardID, _) in ollama {
+            // Use the card id itself as the stable identity for cache stamping
+            merged[cardID] = cardID
+        }
+        return merged
+    }
+
+    /// Build Ollama session cookies map dynamically from the accounts store.
+    /// This allows the UI to add/remove accounts and have them reflected in the providers.
+    private static func buildOllamaSessionCookies(_ accounts: OllamaAccountsStore) -> [String: String] {
+        var cookies: [String: String] = [:]
+        for record in accounts.activeRecords {
+            let cardID = OllamaAccountsStore.cardID(for: record.id)
+            cookies[cardID] = record.sessionCookie
+        }
+        return cookies
     }
 
     /// Re-runs first-launch credential detection on demand — the enablement half of the Customize

@@ -17,6 +17,7 @@ import SwiftUI
 struct CustomizeProviderDetailView: View {
     @Environment(LayoutStore.self) private var layout
     @Environment(AppContainer.self) private var container
+    @Environment(OllamaAccountsStore.self) private var ollamaAccounts
     let providerID: String
     let reorderSpaceName: String
     @Binding var reorderLift: ReorderLift?
@@ -35,6 +36,13 @@ struct CustomizeProviderDetailView: View {
                     .simultaneousGesture(metricDragGesture())
                 if let keyProvider = container.apiKeyProviders.first(where: { $0.provider.id == providerID }) {
                     APIKeysSection(provider: keyProvider)
+                }
+
+                // Ollama account management section (for all Ollama family cards)
+                if isOllamaProvider(providerID) {
+                    OllamaAccountManagementView()
+                        .environment(container.ollamaAccounts)
+                        .padding(.top, 8)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -78,18 +86,27 @@ struct CustomizeProviderDetailView: View {
     /// this section via `applyMetricDividerOrder` (the sentinel sits at the empty section's edge).
     private func emptyDropZone(providerID: String) -> some View {
         let yOutset = max(0, (density.estimatedMetricRowHeight - 30) / 2)
-        return RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-            .foregroundStyle(.tertiary)
-            .frame(height: 30)
-            .padding(8)
-            .overlay(
-                Text("Drag metrics here")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            )
-            .reorderFrame(id: expandedDividerID(for: providerID), in: .named(reorderSpaceName), yOutset: yOutset)
-            .accessibilityLabel("Drag metrics here")
+
+        return ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.3), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                .background(Color(nsColor: .windowBackgroundColor))
+
+            Text("Drag metrics here")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 30)
+        .padding(4)
+        .opacity(0.8)
+        .reorderFrame(id: expandedDividerID(for: providerID), in: .named(reorderSpaceName), yOutset: yOutset)
+        .accessibilityLabel("Drag metrics here")
+    }
+
+    /// Check if a provider ID belongs to the Ollama family (including account cards).
+    private func isOllamaProvider(_ providerID: String) -> Bool {
+        providerID == "ollama" || providerID.hasPrefix("ollama@")
     }
 
     private func metricRow(_ metric: WidgetDescriptor, in providerID: String) -> some View {

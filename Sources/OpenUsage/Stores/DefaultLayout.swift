@@ -77,11 +77,17 @@ enum DefaultLayout {
     /// Account-card-aware default list: for every extra account card in the registry
     /// (`claude@ab12cd34`), the family's entries are re-prefixed onto the card and appended, so a
     /// newly discovered account seeds the same metric set (and caret split) as its family's default
-    /// card. Pins are deliberately NOT translated — an extra account never claims menu-bar space by
-    /// default. `migrationBaselineMetricIDs` is deliberately NOT translated either: account-card ids
-    /// must always read as never-offered so their defaults seed the first time the card appears.
-    static func translatedForAccountCards(_ ids: [String], providerIDs: [String]) -> [String] {
-        let accountCardIDs = providerIDs.filter(ProviderAccountID.isAccountCard)
+    /// card. `migrationBaselineMetricIDs` is deliberately NOT translated: account-card ids must always
+    /// read as never-offered so their defaults seed the first time the card appears.
+    ///
+    /// Pins pass `onlyFamily: "ollama"` so a GUI-added Ollama account claims menu-bar space by default
+    /// (the owner decision for Ollama); Claude/Codex account cards still never auto-pin, so passing
+    /// `onlyFamily: nil` for the enabled/expanded sets keeps every family's existing behavior.
+    static func translatedForAccountCards(_ ids: [String], providerIDs: [String], onlyFamily: String? = nil) -> [String] {
+        var accountCardIDs = providerIDs.filter(ProviderAccountID.isAccountCard)
+        if let onlyFamily {
+            accountCardIDs = accountCardIDs.filter { ProviderAccountID.family(of: $0) == onlyFamily }
+        }
         guard !accountCardIDs.isEmpty else { return ids }
         var result = ids
         for cardID in accountCardIDs {

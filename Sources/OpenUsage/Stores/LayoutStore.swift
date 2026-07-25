@@ -123,13 +123,16 @@ final class LayoutStore {
         self.registry = registry
         let persistence = LayoutPersistence(defaults: defaults, storageKey: storageKey)
         self.persistence = persistence
-        // Extra account cards seed their family's default metric set (and caret split); pins and the
-        // migration baseline are deliberately never translated (see `translatedForAccountCards`).
+        // Extra account cards seed their family's default metric set (and caret split); the migration
+        // baseline is deliberately never translated (see `translatedForAccountCards`). Pins ARE
+        // translated for Ollama account cards only, so a GUI-added Ollama account shows in the menu
+        // bar by default (owner decision); Claude/Codex account cards keep the never-auto-pin behavior.
         let registryProviderIDs = registry.providers.map(\.id)
         let translatedMetricIDs = DefaultLayout.translatedForAccountCards(defaultMetricIDs, providerIDs: registryProviderIDs)
         let translatedExpandedIDs = DefaultLayout.translatedForAccountCards(defaultExpandedMetricIDs, providerIDs: registryProviderIDs)
+        let translatedPinnedIDs = DefaultLayout.translatedForAccountCards(defaultPinnedMetricIDs, providerIDs: registryProviderIDs, onlyFamily: "ollama")
         self.defaultMetricIDs = translatedMetricIDs
-        self.defaultPinnedMetricIDs = defaultPinnedMetricIDs
+        self.defaultPinnedMetricIDs = translatedPinnedIDs
         self.defaultExpandedMetricIDs = translatedExpandedIDs
         self.isProviderEnabled = isProviderEnabled
 
@@ -139,7 +142,7 @@ final class LayoutStore {
             defaults: LayoutDefaultSet(
                 metricIDs: translatedMetricIDs,
                 migrationBaselineMetricIDs: migrationBaselineMetricIDs,
-                pinnedMetricIDs: defaultPinnedMetricIDs,
+                pinnedMetricIDs: translatedPinnedIDs,
                 expandedMetricIDs: translatedExpandedIDs
             )
         )
@@ -154,6 +157,7 @@ final class LayoutStore {
 
         if initial.shouldPersistExpandOnEnable { persistExpandOnEnable() }
         if initial.shouldPersistExpanded { persistExpanded() }
+        if initial.shouldPersistPins { persistPins() }
         if let seededDefaults = initial.seededDefaultsToPersist { persistSeededDefaults(seededDefaults) }
         syncPlacedOrder(persistChanges: initial.shouldPersistPlaced)
     }
