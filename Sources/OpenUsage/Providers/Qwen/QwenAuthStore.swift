@@ -87,6 +87,8 @@ struct QwenAuthStore: Sendable {
     static func extractTicketValue(from raw: String) -> String? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
+        // Reject values that are unreasonably long (typical session tickets are < 1KB).
+        guard text.count <= 4096 else { return nil }
         // Strip a leading "Cookie:" prefix if present.
         let header = text.replacingOccurrences(
             of: "^Cookie:\\s*",
@@ -101,12 +103,20 @@ struct QwenAuthStore: Sendable {
                 let name = trimmed[trimmed.startIndex..<eq].trimmingCharacters(in: .whitespaces)
                 if name == ticketCookieName {
                     let value = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-                    return value.isEmpty ? nil : value
+                    // Validate extracted value: reasonable length and no control characters.
+                    guard !value.isEmpty, value.count <= 4096 else { return nil }
+                    guard !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
+                    return value
                 }
             }
         }
         // No matching cookie: a bare value (no semicolon) is the ticket itself; a multi-cookie header
         // without the ticket is rejected.
-        return header.contains(";") ? nil : header.nilIfEmpty
+        guard !header.contains(";") else { return nil }
+        let bareValue = header.nilIfEmpty
+        // Validate bare value with same checks.
+        guard let value = bareValue, value.count <= 4096 else { return nil }
+        guard !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
+        return value
     }
 }
