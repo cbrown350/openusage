@@ -26,11 +26,15 @@ enum DefaultLayout {
         "grok.weekly", "grok.trend",
         "grok.payAsYouGo", "grok.today", "grok.yesterday", "grok.last30",
 
+        "ollama.session", "ollama.weekly",
+
         "opencode.session", "opencode.weekly", "opencode.monthly", "opencode.trend",
         "opencode.today", "opencode.yesterday", "opencode.last30",
 
         "openrouter.credits", "openrouter.balance",
         "openrouter.today", "openrouter.week", "openrouter.month", "openrouter.keyLimit",
+
+        "qwen.fiveHour", "qwen.weekly",
 
         "zai.session", "zai.weekly", "zai.webSearches"
     ]
@@ -64,7 +68,9 @@ enum DefaultLayout {
         "codex.session", "codex.weekly",
         "cursor.auto", "cursor.api",
         "copilot.premium",
+        "ollama.session", "ollama.weekly",
         "openrouter.credits",
+        "qwen.fiveHour", "qwen.weekly",
         "zai.session", "zai.weekly"
     ]
 

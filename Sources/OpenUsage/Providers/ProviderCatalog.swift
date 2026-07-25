@@ -39,8 +39,10 @@ enum ProviderCatalog {
             CopilotProvider(defaults: defaults),
             DevinProvider(),
             GrokProvider(),
+            OllamaProvider(),
             OpenCodeProvider(),
             OpenRouterProvider(),
+            QwenProvider(),
             ZAIProvider()
         ]
         return runtimes

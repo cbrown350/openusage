@@ -28,11 +28,11 @@ struct APIKeysSection: View {
     @State private var revealedKey: String?
     @State private var actionError: String?
 
-    private static let inputPlaceholder = "sk-or-v1-…"
+    private var inputPlaceholder: String { provider.credentialKind.placeholder }
 
     var body: some View {
         VStack(alignment: .leading, spacing: density.headerToCardSpacing) {
-            Text("API Key")
+            Text(provider.credentialKind.sectionTitle)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 8)
@@ -105,6 +105,11 @@ struct APIKeysSection: View {
                 // re-appears) or to none (the notSet editor takes over).
                 keyField(editable: false)
             }
+            if let hint = provider.credentialKind.hint {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
             if let actionError {
                 Text(actionError)
                     .font(.caption)
@@ -128,7 +133,7 @@ struct APIKeysSection: View {
         if editable {
             APIKeyField(
                 text: $input,
-                placeholder: Self.inputPlaceholder,
+                placeholder: inputPlaceholder,
                 readOnly: false,
                 displayText: "",
                 reveal: revealInput,
