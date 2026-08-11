@@ -30,9 +30,10 @@ settings page.
 
 > **Heads-up:** because Ollama offers no official usage API, this provider scrapes the account settings
 > page. That works today but is an unofficial contract — if Ollama redesigns the page the meters may
-> temporarily show a parse error until OpenUsage is updated. If Ollama ships a real usage endpoint,
-> OpenUsage already prefers an `OLLAMA_API_KEY` against `GET /api/account/usage` when no session cookie
-> is set.
+> temporarily show a parse error until OpenUsage is updated. Ollama has since exposed an undocumented
+> `GET /api/usage`, and OpenUsage uses it with an `OLLAMA_API_KEY` when no session cookie is set. The
+> scrape stays the primary source because that endpoint is not public yet, returns no reset times, and
+> Ollama has said the data isn't final.
 
 ## Setup
 
@@ -69,8 +70,8 @@ In the [CLI](../cli.md) and [local API](../local-http-api.md), additional accoun
 - `GET https://ollama.com/settings` with `Cookie: __Secure-session=…`. The returned HTML is parsed for
   the first two `N% used` values (Session, then Weekly), the `data-time` reset timestamps (or relative
   "Resets in …" text as a fallback), and the plan label that follows the "Cloud Usage" heading.
-- Fallback when only an `OLLAMA_API_KEY` is present: `GET https://ollama.com/api/account/usage`
-  (a future endpoint — expected to be absent until Ollama ships it).
+- Fallback when only an `OLLAMA_API_KEY` is present: `GET https://ollama.com/api/usage`
+  (live but undocumented; reports each window as a used-fraction and carries no reset times).
 
 A logged-out cookie follows the redirect to the login page (no "Cloud Usage" section), which OpenUsage
 reports as an expired session rather than blank meters. Missing usage values are reported as an invalid

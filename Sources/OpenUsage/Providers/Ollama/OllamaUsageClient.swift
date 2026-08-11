@@ -2,7 +2,10 @@ import Foundation
 
 struct OllamaUsageClient: Sendable {
     static let settingsURL = URL(string: "https://ollama.com/settings")!
-    static let apiUsageURL = URL(string: "https://ollama.com/api/account/usage")!
+    /// The account usage endpoint. `https://ollama.com/api/account/usage` (previously used here) does not
+    /// exist — it answers 404 `path not found`; the live route is `/api/usage`, authorized with an
+    /// `OLLAMA_API_KEY` bearer token.
+    static let apiUsageURL = URL(string: "https://ollama.com/api/usage")!
 
     var http: any HTTPClient
 
@@ -25,8 +28,8 @@ struct OllamaUsageClient: Sendable {
         ))
     }
 
-    /// Fallback: query a future `/api/account/usage` endpoint with an API key. Today this endpoint
-    /// is expected to be absent (404); the provider treats that gracefully.
+    /// Fallback: query `/api/usage` with an API key. Live but not yet publicly documented, so a non-2xx
+    /// is treated as a request failure rather than blank meters.
     func fetchAPIUsage(apiKey: String) async throws -> HTTPResponse {
         try await http.send(HTTPRequest(
             method: "GET",

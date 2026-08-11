@@ -212,6 +212,63 @@ final class QwenUsageMapperTests: XCTestCase {
         XCTAssertNil(QwenUsageMapper.dataPayload(Data("garbage".utf8)))
     }
 
+    // MARK: Flattened envelope (console SPA migration)
+
+    /// Regression: the console dropped the `DataV2` wrapper, so the gateway now answers
+    /// `data → data` directly. The old unwrapper required `DataV2` and returned nil for every
+    /// response, surfacing as "Could not parse Qwen Token Plan usage" on a perfectly valid ticket.
+    func testParseUsageAcceptsFlattenedEnvelope() throws {
+        let flattened = Data(#"""
+        {"code":"200","data":{"code":"SUCCESS","success":true,
+          "data":{"per5HourPercentage":0.25,"per1WeekPercentage":0.5,
+                  "per5HourResetTime":1784942280000,"per1WeekResetTime":1785460860000}}}
+        """#.utf8)
+        let usage = try QwenUsageMapper.parseUsage(flattened)
+        XCTAssertEqual(usage.fiveHourPercent, 25, accuracy: 0.001)
+        XCTAssertEqual(usage.weeklyPercent, 50, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(usage.fiveHourResetsAt).timeIntervalSince1970, 1_784_942_280, accuracy: 1)
+    }
+
+    func testPlanNameFromFlattenedEnvelope() {
+        let flattened = Data(#"""
+        {"data":{"code":"SUCCESS","success":true,"data":{"specCode":"pro"}}}
+        """#.utf8)
+        XCTAssertEqual(QwenUsageMapper.planName(from: flattened), "Pro")
+    }
+
+    /// The gateway reports a dead ticket as HTTP 200 with `errorCode: BailianGateway.Login.NotLogined`,
+    /// so it must be classified as an expired session rather than a parse failure. Captured verbatim.
+    func testDetectsNotLoggedInEnvelope() {
+        let notLogined = Data(#"""
+        {"code":"200","data":{"success":false,"httpStatus":200,
+          "errorCode":"BailianGateway.Login.NotLogined",
+          "api":"zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage",
+          "errorMsg":"BailianGateway.Login.NotLogined"},
+          "httpStatusCode":"200","successResponse":true}
+        """#.utf8)
+        XCTAssertTrue(QwenUsageMapper.isNotLoggedIn(notLogined))
+        XCTAssertNil(QwenUsageMapper.dataPayload(notLogined))
+    }
+
+    func testNotLoggedInFalseForValidPayloads() {
+        XCTAssertFalse(QwenUsageMapper.isNotLoggedIn(Data(usageJSON.utf8)))
+        XCTAssertFalse(QwenUsageMapper.isNotLoggedIn(Data("garbage".utf8)))
+    }
+
+    /// Regression: Qwen omits the 5-hour window fields (`per5HourPercentage`, `per5HourResetTime`)
+    /// when no session window is active. Previously that was treated as an invalid response; now the
+    /// 5-hour meter reads 0% while the weekly meter still shows real usage. Captured from a live ticket.
+    func testParseUsageHandlesMissingFiveHourWindow() throws {
+        let missing5h = Data(#"""
+        {"code":"200","data":{"DataV2":{"ret":["SUCCESS"],"data":{"msg":"Success.","code":"SUCCESS","success":true,"data":{"per1WeekResetTime":1787008560000,"per1WeekPercentage":0.284497583929}}},"success":true,"httpStatus":200,"errorCode":"","api":"zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage","errorMsg":""},"httpStatusCode":"200","successResponse":true}
+        """#.utf8)
+        let usage = try QwenUsageMapper.parseUsage(missing5h)
+        XCTAssertEqual(usage.fiveHourPercent, 0)
+        XCTAssertEqual(usage.weeklyPercent, 28.4498, accuracy: 0.001)
+        XCTAssertNil(usage.fiveHourResetsAt)
+        XCTAssertNotNil(usage.weeklyResetsAt)
+    }
+
     private func progress(_ lines: [MetricLine], _ label: String) -> (used: Double, limit: Double, format: ProgressFormat, periodDurationMs: Int?)? {
         guard case .progress(_, let used, let limit, let format, _, let periodDurationMs, _) = lines.first(where: { $0.label == label }) else {
             return nil
@@ -229,7 +286,8 @@ final class QwenProviderTests: XCTestCase {
         page: @escaping @Sendable () -> HTTPResponse = { json(billingPageHTML) },
         usage: @escaping @Sendable () -> HTTPResponse = { json(usageJSON) },
         subscription: @escaping @Sendable () -> HTTPResponse = { json(subscriptionJSON) },
-        assertCookie: Bool = true
+        assertCookie: Bool = true,
+        expectedSecToken: String? = "test-sec-token"
     ) -> RoutingHTTPClient {
         RoutingHTTPClient { request in
             if request.url == QwenUsageClient.billingPageURL {
@@ -240,9 +298,12 @@ final class QwenProviderTests: XCTestCase {
             }
             let urlString = request.url.absoluteString
             if urlString.contains("v2%2Fusage") {
-                // The CSRF token lifted from the page rides in the form body.
-                let body = String(decoding: request.body ?? Data(), as: UTF8.self)
-                XCTAssertTrue(body.contains("sec_token=test-sec-token"))
+                // The CSRF token lifted from the page rides in the form body. It is empty when the page
+                // carries no token — the gateway authorizes on the ticket cookie, not on `sec_token`.
+                if let expectedSecToken {
+                    let body = String(decoding: request.body ?? Data(), as: UTF8.self)
+                    XCTAssertTrue(body.contains("sec_token=\(expectedSecToken)"))
+                }
                 return usage()
             }
             if urlString.contains("v2%2Fsubscription") {
@@ -295,13 +356,37 @@ final class QwenProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.errorCategory, .notLoggedIn)
     }
 
-    func testRefreshWithNoSecTokenReportsExpiredSession() async {
-        // A ticket that no longer authenticates lands on a login page with no SEC_TOKEN.
+    /// Regression: the console SPA no longer embeds `SEC_TOKEN`, so a token-less page is the normal
+    /// case — not an expired session. Previously this bailed early with `.authExpired`, which made every
+    /// refresh fail with "session expired" even right after the user pasted a fresh ticket.
+    func testRefreshSucceedsWhenPageHasNoSecToken() async {
+        let provider = QwenProvider(
+            authStore: makeAuthStore(ticket: "ticket-value"),
+            usageClient: QwenUsageClient(http: routingClient(
+                page: { json("<html><body>SPA shell, no token</body></html>") },
+                expectedSecToken: ""
+            ))
+        )
+        let snapshot = await provider.refresh()
+        XCTAssertNil(snapshot.errorCategory)
+        XCTAssertNotNil(snapshot.line(label: "5-Hour Window"))
+        XCTAssertNotNil(snapshot.line(label: "Weekly"))
+    }
+
+    /// An actually-expired ticket is signalled by the gateway in the envelope (HTTP 200 +
+    /// `BailianGateway.Login.NotLogined`), not by the absence of a token on the page.
+    func testRefreshReportsExpiredSessionOnNotLoginedEnvelope() async {
+        let notLogined = #"""
+        {"code":"200","data":{"success":false,"httpStatus":200,
+          "errorCode":"BailianGateway.Login.NotLogined","errorMsg":"BailianGateway.Login.NotLogined"}}
+        """#
         let provider = QwenProvider(
             authStore: makeAuthStore(ticket: "stale"),
             usageClient: QwenUsageClient(http: routingClient(
-                page: { json("<html><body>Sign in</body></html>") },
-                assertCookie: false
+                page: { json("<html><body>SPA shell</body></html>") },
+                usage: { json(notLogined) },
+                assertCookie: false,
+                expectedSecToken: nil
             ))
         )
         let snapshot = await provider.refresh()

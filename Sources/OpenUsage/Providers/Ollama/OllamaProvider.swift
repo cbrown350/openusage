@@ -75,7 +75,9 @@ final class OllamaProvider: ProviderRuntime {
 
     func refresh() async -> ProviderSnapshot {
         // Primary: the session cookie → scrape the authenticated settings page. Fallback: an
-        // `OLLAMA_API_KEY` → a future `GET /api/account/usage` (expected to 404 until Ollama ships it).
+        // `OLLAMA_API_KEY` → `GET /api/usage`. The scrape stays primary because the API is not public
+        // yet (Ollama: "the data isn't fully accurate for some of the things we want to return") and
+        // returns no reset timestamps.
         if let session = await loadOffMainActor({ [authStore] in authStore.loadSessionCookie() }) {
             return await refreshFromSettings(sessionCookie: session.sessionCookie)
         }
@@ -135,8 +137,8 @@ final class OllamaProvider: ProviderRuntime {
         )
     }
 
-    /// Future-proofed JSON path: `GET /api/account/usage` with an `OLLAMA_API_KEY`. Today this endpoint
-    /// is expected to be absent (404); any non-2xx surfaces as a request failure rather than blank meters.
+    /// JSON path: `GET /api/usage` with an `OLLAMA_API_KEY`. The endpoint is live but undocumented and
+    /// still stabilizing, so any non-2xx surfaces as a request failure rather than blank meters.
     private func refreshFromAPI(apiKey: String) async -> ProviderSnapshot {
         let response: HTTPResponse
         do {

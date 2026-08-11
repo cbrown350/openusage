@@ -47,14 +47,16 @@ The billing console is a single-page app that fetches data through Alibaba Cloud
 OpenUsage makes the same two-step call the page does:
 
 1. `GET https://home.qwencloud.com/billing/subscription/token-plan-individual` with
-   `Cookie: login_qwencloud_ticket=…` — lifts the CSRF `SEC_TOKEN` embedded in the page.
+   `Cookie: login_qwencloud_ticket=…` — lifts the CSRF `SEC_TOKEN` if the page still embeds one.
 2. `POST https://cs-data.qwencloud.com/data/api.json` (with the ticket cookie and that token) for:
    - **usage** — the 5-hour and weekly windows as used-fractions, with epoch-millisecond reset times;
    - **subscription** — the plan tier (`specCode`), fetched best-effort for the plan name only.
 
-A ticket that no longer authenticates lands on the login page (no `SEC_TOKEN`), which OpenUsage reports
-as an expired session. Missing usage values are reported as an invalid response instead of being shown
-as zero.
+The console has since become a client-rendered page that no longer ships `SEC_TOKEN` in its HTML, and the
+gateway authorizes on the ticket cookie alone, so a missing token is normal and not treated as an error.
+The gateway also answers `200 OK` for a dead ticket, flagging it only inside the response body — so
+OpenUsage reads that marker to tell an expired ticket apart from a genuine format change. Missing usage
+values are reported as an invalid response instead of being shown as zero.
 
 ## Troubleshooting
 

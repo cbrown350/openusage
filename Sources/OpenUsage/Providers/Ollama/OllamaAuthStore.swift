@@ -49,7 +49,7 @@ struct OllamaAuthStore: Sendable {
     /// `OLLAMA_COOKIE` is accepted as a fallback (a full Cookie header value from which the
     /// `__Secure-session` value is extracted).
     static let environmentNames = ["OLLAMA_SESSION_COOKIE", "OLLAMA_COOKIE"]
-    /// Environment-only fallback credential for a future `GET /api/account/usage`: an Ollama API key.
+    /// Environment-only fallback credential for `GET /api/usage`: an Ollama API key.
     /// Not managed through the Settings card (that edits the session cookie); read straight from the
     /// environment so a user who exports `OLLAMA_API_KEY` gets the API path without a config file.
     static let apiKeyEnvironmentName = "OLLAMA_API_KEY"
@@ -125,7 +125,7 @@ struct OllamaAuthStore: Sendable {
         store.loadKey().flatMap { Self.extractSessionValue(from: $0) }
     }
 
-    /// The env-only `OLLAMA_API_KEY` fallback (a Bearer token for a future `/api/account/usage`), or
+    /// The env-only `OLLAMA_API_KEY` fallback (a Bearer token for `/api/usage`), or
     /// `nil`. Distinct from the GUI-managed session cookie above.
     func loadAPIKey() -> String? {
         environment.value(for: Self.apiKeyEnvironmentName)?

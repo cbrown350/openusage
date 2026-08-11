@@ -284,7 +284,7 @@ final class OllamaUsageMapperTests: XCTestCase {
         XCTAssertNil(OllamaUsageMapper.parseAccountName(from: loginHTML))
     }
 
-    // MARK: API fallback (future /api/account/usage)
+    // MARK: API fallback (/api/usage)
 
     func testParseAPIUsageNestedObjects() {
         let body = Data(#"""
@@ -309,6 +309,29 @@ final class OllamaUsageMapperTests: XCTestCase {
     func testParseAPIUsageNilWhenFieldsMissing() {
         XCTAssertNil(OllamaUsageMapper.parseAPIUsage(Data(#"{"unrelated":1}"#.utf8)))
         XCTAssertNil(OllamaUsageMapper.parseAPIUsage(Data("not json".utf8)))
+    }
+
+    /// The live `GET /api/usage` shape: windows nested under `limits`, each a 0–1 fraction that must be
+    /// scaled to a 0–100 percentage. Captured from the endpoint's documented response.
+    func testParseAPIUsageLiveLimitsShape() throws {
+        let body = Data(#"""
+        {"activity":{"cost":"0.00000","period":{"type":"last_4_weeks"},"models":[]},
+         "limits":{"session":{"usage":0.046,"models":[{"name":"glm-5.2","request_count":34}]},
+                   "weekly":{"usage":0.051,"models":[{"name":"glm-5.2","request_count":254}]}}}
+        """#.utf8)
+        let usage = OllamaUsageMapper.parseAPIUsage(body)
+        XCTAssertEqual(try XCTUnwrap(usage).sessionPercent, 4.6, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(usage).weeklyPercent, 5.1, accuracy: 0.001)
+        // The endpoint returns no reset timestamps today.
+        XCTAssertNil(usage?.sessionResetsAt)
+    }
+
+    /// A fully-consumed window reports `usage: 1.0`, which must clamp to 100 rather than overflow.
+    func testParseAPIUsageClampsFullWindow() {
+        let body = Data(#"{"limits":{"session":{"usage":1.0},"weekly":{"usage":1.25}}}"#.utf8)
+        let usage = OllamaUsageMapper.parseAPIUsage(body)
+        XCTAssertEqual(usage?.sessionPercent, 100)
+        XCTAssertEqual(usage?.weeklyPercent, 100)
     }
 
     private func progress(_ lines: [MetricLine], _ label: String) -> (format: ProgressFormat, periodDurationMs: Int?)? {
@@ -428,7 +451,7 @@ final class OllamaProviderTests: XCTestCase {
     }
 
     func testRefreshFallsBackToAPIKeyWhenNoCookie() async {
-        // No session cookie, but an OLLAMA_API_KEY → the future /api/account/usage path.
+        // No session cookie, but an OLLAMA_API_KEY → the /api/usage path.
         let provider = OllamaProvider(
             authStore: OllamaAuthStore(files: FakeFiles(), environment: FakeEnvironment(["OLLAMA_API_KEY": "ollama-key"])),
             usageClient: OllamaUsageClient(http: RoutingHTTPClient { request in

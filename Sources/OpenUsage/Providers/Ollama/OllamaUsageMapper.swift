@@ -15,8 +15,8 @@ struct OllamaUsage: Hashable, Sendable {
 /// authenticated `https://ollama.com/settings` HTML, porting the legacy Tauri plugin shipped in PR #470:
 /// the first `N% used` is the Session meter (5-hour window), the second is the Weekly meter (7-day
 /// window), `data-time="…"` carries ISO-8601 reset timestamps, and the plan label follows the
-/// "Cloud Usage" heading. A future `GET /api/account/usage` (JSON) is parsed too, so the provider can
-/// prefer it once Ollama ships it. The mapper is pure (no I/O) so it tests cleanly against fixtures.
+/// "Cloud Usage" heading. The live `GET /api/usage` (JSON) is parsed too, so the provider can prefer it
+/// once Ollama makes it public. The mapper is pure (no I/O) so it tests cleanly against fixtures.
 enum OllamaUsageMapper {
     static let sessionPeriodMs = 5 * 60 * 60 * 1000
     static let weeklyPeriodMs = 7 * 24 * 60 * 60 * 1000
@@ -109,23 +109,28 @@ enum OllamaUsageMapper {
         )
     }
 
-    /// Parse a future `GET /api/account/usage` JSON body — the fallback the provider uses with an
-    /// `OLLAMA_API_KEY` when no settings-page cookie exists. Tolerates the shapes the legacy plugin
-    /// accepted: nested `session`/`weekly` objects (with `used_percent`-style keys and `resets_at`), or
-    /// flat `session_percent`/`weekly_percent` fields at the root (optionally under a `data` wrapper).
+    /// Parse a `GET /api/usage` JSON body — the fallback the provider uses with an `OLLAMA_API_KEY`.
+    ///
+    /// The live shape nests the windows under `limits`, reporting each as a 0–1 **fraction**:
+    /// `{"limits":{"session":{"usage":0.046},"weekly":{"usage":0.051}}}`. Older/looser shapes are still
+    /// accepted: nested `session`/`weekly` objects with `used_percent`-style keys (0–100) and
+    /// `resets_at`, or flat `session_percent`/`weekly_percent` at the root. Note the endpoint returns no
+    /// reset timestamps today, so the meters fall back to the period duration for their countdown.
     static func parseAPIUsage(_ body: Data) -> OllamaUsage? {
         guard let root = ProviderParse.jsonObject(body) else { return nil }
         let container = (root["data"] as? [String: Any]) ?? root
+        // `limits` is the current wrapper; fall back to the root for the older flat/nested shapes.
+        let limits = (container["limits"] as? [String: Any]) ?? container
 
-        let session = nestedObject(container, keys: ["session", "session_usage", "sessionUsage"])
-        let weekly = nestedObject(container, keys: ["weekly", "weekly_usage", "weeklyUsage"])
+        let session = nestedObject(limits, keys: ["session", "session_usage", "sessionUsage"])
+        let weekly = nestedObject(limits, keys: ["weekly", "weekly_usage", "weeklyUsage"])
 
         let sessionPercent = clampPercent(
-            session.flatMap { firstNumber($0, keys: ["used_percent", "usedPercent", "percent", "percentage"]) }
+            session.flatMap { windowPercent($0) }
                 ?? ProviderParse.number(container["session_percent"] ?? container["sessionPercent"])
         )
         let weeklyPercent = clampPercent(
-            weekly.flatMap { firstNumber($0, keys: ["used_percent", "usedPercent", "percent", "percentage"]) }
+            weekly.flatMap { windowPercent($0) }
                 ?? ProviderParse.number(container["weekly_percent"] ?? container["weeklyPercent"])
         )
         guard let sessionPercent, let weeklyPercent else { return nil }
@@ -142,6 +147,15 @@ enum OllamaUsageMapper {
                 (weekly?["resets_at"] ?? weekly?["resetsAt"] ?? container["weekly_resets_at"]) as? String
             )
         )
+    }
+
+    /// A window object's used percentage, normalizing the two conventions in play: `usage` is a 0–1
+    /// fraction (scaled to 0–100 here), while the `used_percent` family is already 0–100.
+    private static func windowPercent(_ window: [String: Any]) -> Double? {
+        if let fraction = ProviderParse.number(window["usage"]) {
+            return fraction * 100
+        }
+        return firstNumber(window, keys: ["used_percent", "usedPercent", "percent", "percentage"])
     }
 
     // MARK: - Percentages

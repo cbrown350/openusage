@@ -46,23 +46,20 @@ final class QwenProvider: ProviderRuntime {
             return ProviderSnapshot.error(provider: provider, error: QwenAuthError.missingKey)
         }
 
-        // Step 1: lift the CSRF `SEC_TOKEN` off the authenticated billing page. A ticket that no longer
-        // authenticates lands on the login page (no token) — an expired session, not a parse failure.
-        let page: HTTPResponse
-        do {
-            page = try await usageClient.fetchBillingPage(sessionTicket: auth.sessionTicket)
-        } catch {
-            return ProviderSnapshot.error(provider: provider, error: QwenUsageError.connectionFailed)
-        }
-        if let expired = Self.authFailureStatus(page.statusCode) {
+        // Step 1: best-effort lift of the CSRF `SEC_TOKEN` from the billing page.
+        //
+        // The console migrated to a client-rendered SPA shell that no longer embeds `SEC_TOKEN` in the
+        // server HTML, and the gateway no longer enforces the field (an empty or bogus `sec_token` still
+        // passes CSRF and is authorized purely on the ticket cookie). So a missing token is NOT an
+        // expired session — treating it as one made every refresh fail with "session expired" even
+        // immediately after the user pasted a fresh ticket. Send whatever the page yields (empty when
+        // absent) and let the gateway be the sole judge of the ticket.
+        let page = try? await usageClient.fetchBillingPage(sessionTicket: auth.sessionTicket)
+        if let page, let expired = Self.authFailureStatus(page.statusCode) {
             return ProviderSnapshot.error(provider: provider, error: expired)
         }
-        guard (200..<300).contains(page.statusCode) else {
-            return ProviderSnapshot.error(provider: provider, error: QwenUsageError.requestFailed(page.statusCode))
-        }
-        guard let secToken = QwenUsageClient.extractSecToken(from: String(decoding: page.body, as: UTF8.self)) else {
-            return ProviderSnapshot.error(provider: provider, error: QwenUsageError.sessionExpired)
-        }
+        let secToken = page
+            .map { QwenUsageClient.extractSecToken(from: String(decoding: $0.body, as: UTF8.self)) ?? "" } ?? ""
 
         // Step 2: the usage windows are required; the subscription (plan tier) is best-effort.
         let usage = await load { try await usageClient.fetchUsage(sessionTicket: auth.sessionTicket, secToken: secToken) }
@@ -72,6 +69,12 @@ final class QwenProvider: ProviderRuntime {
 
         switch usage {
         case .success(let body):
+            // The gateway answers 200 even for a dead ticket, flagging it only in the envelope. Classify
+            // that as an expired session so the user is told to refresh the ticket rather than shown a
+            // misleading parse error.
+            guard !QwenUsageMapper.isNotLoggedIn(body) else {
+                return ProviderSnapshot.error(provider: provider, error: QwenUsageError.sessionExpired)
+            }
             do {
                 let mapped = try QwenUsageMapper.map(usageBody: body, subscriptionBody: subscription)
                 return ProviderSnapshot.make(provider: provider, plan: mapped.plan, lines: mapped.lines, refreshedAt: now())
