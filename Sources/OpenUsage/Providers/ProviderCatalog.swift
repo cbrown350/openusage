@@ -45,6 +45,8 @@ enum ProviderCatalog {
             GrokProvider(),
         ]
 
+        runtimes.append(ModalProvider())
+
         // Ollama multi-account setup
         AppLog.info(.config, "ProviderCatalog: building Ollama providers (\(ollamaCards.count) cards)")
         if ollamaCards.isEmpty {

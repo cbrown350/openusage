@@ -26,6 +26,8 @@ enum DefaultLayout {
         "grok.weekly", "grok.trend",
         "grok.payAsYouGo", "grok.today", "grok.yesterday", "grok.last30",
 
+        "modal.spend", "modal.credits",
+
         "ollama.session", "ollama.weekly",
 
         "opencode.session", "opencode.weekly", "opencode.monthly", "opencode.trend",
@@ -124,6 +126,9 @@ enum DefaultLayout {
         "copilot.orgCredits", "copilot.orgSpend", "copilot.chat", "copilot.completions",
         "devin.extra",
         "grok.payAsYouGo", "grok.today", "grok.yesterday", "grok.last30",
+        // Modal: the Spend meter (dollars of the monthly spend limit) stays above the fold; the
+        // Credits row (dollars remaining of the free grant) sits below the caret.
+        "modal.credits",
         // OpenCode: the three Go caps (Session/Weekly/Monthly) and Usage Trend stay above the fold —
         // matching every other provider — with the spend tiles (Today/Yesterday/Last 30 Days) below.
         "opencode.today", "opencode.yesterday", "opencode.last30",
