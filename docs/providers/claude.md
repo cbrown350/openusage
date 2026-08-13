@@ -10,7 +10,7 @@ Tracks your Claude subscription limits using the login you already have from Cla
 | Weekly | 7-day window usage |
 | Sonnet | Separate weekly Sonnet limit (plan-dependent) |
 | Fable | Separate weekly Fable limit (model-scoped window from the `limits` array) |
-| Extra Usage | Extra-usage credits spent against your monthly cap |
+| Extra Usage | Extra-usage credits spent against your monthly cap (still shown when the cap is reached and Anthropic turns the spend off) |
 | Today / Yesterday / Last 30 Days | Local spend, as cost, tokens, or both (see below) |
 
 When Claude reports your plan name, OpenUsage shows it beside the provider name.

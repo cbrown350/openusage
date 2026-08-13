@@ -293,6 +293,44 @@ final class ClaudeUsageMapperTests: XCTestCase {
         XCTAssertNil(progress(mapped.lines, "Extra usage spent"))
     }
 
+    func testExtraUsageStillShownWhenDisabledAfterCapReached() throws {
+        // Anthropic flips `is_enabled` to false once the monthly cap is reached (`spend_limit_reached`,
+        // `disabled_reason: "org_level_disabled_until"`) but keeps reporting the real spend — the row
+        // must not vanish into "No data" just because the toggle is off.
+        let response = HTTPResponse(
+            statusCode: 200,
+            headers: [:],
+            body: Data("""
+            {"extra_usage":{"is_enabled":false,"monthly_limit":4000,"used_credits":4257.0,
+            "utilization":100.0,"disabled_reason":"org_level_disabled_until","spend_limit_reached":true}}
+            """.utf8)
+        )
+
+        let mapped = try ClaudeUsageMapper.mapUsageResponse(
+            response,
+            credentials: ClaudeOAuth(subscriptionType: "max")
+        )
+
+        XCTAssertEqual(progress(mapped.lines, "Extra usage spent")?.used, 42.57)
+        XCTAssertEqual(progress(mapped.lines, "Extra usage spent")?.limit, 40)
+    }
+
+    func testDisabledExtraUsageWithNoSpendHasNoRow() throws {
+        // Disabled and nothing spent: there is nothing to show, so no row (never a misleading $0 bar).
+        let response = HTTPResponse(
+            statusCode: 200,
+            headers: [:],
+            body: Data(#"{"extra_usage":{"is_enabled":false,"monthly_limit":4000,"used_credits":0}}"#.utf8)
+        )
+
+        let mapped = try ClaudeUsageMapper.mapUsageResponse(
+            response,
+            credentials: ClaudeOAuth(subscriptionType: "max")
+        )
+
+        XCTAssertNil(mapped.lines.first(where: { $0.label == "Extra usage spent" }))
+    }
+
     func testMapsResetsAtFromMicrosecondTimestampWithoutTimezone() throws {
         let response = HTTPResponse(
             statusCode: 200,

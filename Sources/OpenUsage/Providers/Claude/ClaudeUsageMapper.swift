@@ -149,16 +149,21 @@ enum ClaudeUsageMapper {
         }
     }
 
+    /// Anthropic flips `is_enabled` to false once the monthly cap is reached (or the org pauses extra
+    /// usage — `disabled_reason: "org_level_disabled_until"`, `spend_limit_reached: true`), but keeps
+    /// reporting the real spend. Show the row whenever there is something to show — an enabled cap or
+    /// actual spend — so a reached cap doesn't blank the widget to "No data". A disabled account with
+    /// nothing spent still gets no row.
     private static func appendExtraUsage(_ value: Any?, to lines: inout [MetricLine]) {
         guard let object = value as? [String: Any],
-              object["is_enabled"] as? Bool == true,
               let usedCents = ProviderParse.number(object["used_credits"])
         else {
             return
         }
 
+        let isEnabled = object["is_enabled"] as? Bool == true
         let used = ProviderParse.centsToDollars(usedCents)
-        if let limitCents = ProviderParse.number(object["monthly_limit"]), limitCents > 0 {
+        if let limitCents = ProviderParse.number(object["monthly_limit"]), limitCents > 0, isEnabled || used > 0 {
             lines.append(.progress(
                 label: "Extra usage spent",
                 used: used,
